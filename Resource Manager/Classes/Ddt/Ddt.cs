@@ -11,7 +11,12 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
+using System.Windows.Interop;
 using System.Windows.Media.Imaging;
 
 namespace Resource_Manager.Classes.Ddt
@@ -42,27 +47,63 @@ namespace Resource_Manager.Classes.Ddt
         Cube = 8
     }
 
+    public static class DDTFileVersions
+    {
+        public const string V3 = "RTS3";
+        public const string V4 = "RTS4";
+    }
+
+    public static class DDTFileHelper
+    {
+        private static Dictionary<DdtFileTypeFormat, CompressionFormat> FormatMapping = new()
+            {
+                { DdtFileTypeFormat.Dxt1, CompressionFormat.Bc1 },
+                { DdtFileTypeFormat.Dxt1DE, CompressionFormat.Bc1WithAlpha },
+                { DdtFileTypeFormat.Dxt3, CompressionFormat.Bc2 },
+                { DdtFileTypeFormat.Dxt5, CompressionFormat.Bc3 },
+                { DdtFileTypeFormat.Grey, CompressionFormat.R },
+                { DdtFileTypeFormat.Bgra, CompressionFormat.Bgra }
+            };
+
+        public static CompressionFormat GetCompressionFormat(DdtFileTypeFormat format)
+        {
+            if (FormatMapping.ContainsKey(format))
+            {
+                return FormatMapping[format];
+            }
+            return CompressionFormat.Bgra;
+        }
+    }
 
     public class Ddt
     {
-        public uint Head { get; set; }
+        public string Head { get; set; }
         public DdtFileTypeUsage Usage { get; set; }
         public DdtFileTypeAlpha Alpha { get; set; }
         public DdtFileTypeFormat Format { get; set; }
         public byte MipmapLevels { get; set; }
         public ushort BaseWidth { get; set; }
         public ushort BaseHeight { get; set; }
+        public byte[] ColorTable { get; set; }
+
         public BitmapImage Bitmap { get; set; }
 
         public Image<Rgba32> mipmapMain { get; set; }
+
 
         public string DdtInfo
         {
             get
             {
-                return BaseWidth.ToString() + "x" + BaseHeight.ToString() + ", " + Format.ToString().ToUpper() + " (" + ((byte)Usage).ToString() + " " + ((byte)Alpha).ToString() + " " + ((byte)Format).ToString() + " " + (MipmapLevels).ToString() + ")";
+                return BaseWidth.ToString() + "x" + BaseHeight.ToString() + ", " +
+                    Format.ToString().ToUpper() + " (" + Head + " " +
+                    ((byte)Usage).ToString() + " " +
+                    ((byte)Alpha).ToString() + " " +
+                    ((byte)Format).ToString() + " " +
+                    (MipmapLevels).ToString() + ")";
             }
         }
+
 
         public async Task Create(byte[] source)
         {
@@ -70,69 +111,11 @@ namespace Resource_Manager.Classes.Ddt
             {
                 using (var binaryReader = new BinaryReader(stream))
                 {
-                    Head = binaryReader.ReadUInt32();
-                    Usage = (DdtFileTypeUsage)binaryReader.ReadByte();
-                    Alpha = (DdtFileTypeAlpha)binaryReader.ReadByte();
-                    Format = (DdtFileTypeFormat)binaryReader.ReadByte();
-                    MipmapLevels = binaryReader.ReadByte();
-                    BaseWidth = (ushort)binaryReader.ReadInt32();
-                    BaseHeight = (ushort)binaryReader.ReadInt32();
-                    List<byte> mipmaps = new List<byte>();
-                    var numImagesPerLevel = Usage.HasFlag(DdtFileTypeUsage.Cube) ? 6 : 1;
-                    for (var index = 0; index < MipmapLevels * numImagesPerLevel; index++)
-                    {
-                        binaryReader.BaseStream.Position = 16 + 8 * index;
-                        var width = BaseWidth >> (index / numImagesPerLevel);
-                        if (width < 1)
-                            width = 1;
-                        var height = BaseHeight >> (index / numImagesPerLevel);
-                        if (height < 1)
-                            height = 1;
-                        var offset = binaryReader.ReadInt32();
-                        var length = binaryReader.ReadInt32();
-                        binaryReader.BaseStream.Position = offset;
-                        mipmaps.AddRange(binaryReader.ReadBytes(length));
-                        break;
-                    }
+                    ReadTextureInfo(binaryReader);
+                    mipmapMain = await ReadPixels(binaryReader, false, CancellationToken.None);
 
-                    BcDecoder decoder = new BcDecoder();
-                    
-                    Image<Rgba32> image;
-                    switch (Format)
-                    {
-                        case DdtFileTypeFormat.Dxt1:
-                            image = await decoder.DecodeRawToImageRgba32Async(mipmaps.ToArray(), BaseWidth, BaseHeight, BCnEncoder.Shared.CompressionFormat.Bc1);
-                            break;
-                        case DdtFileTypeFormat.Dxt1DE:
-                            image = await decoder.DecodeRawToImageRgba32Async(mipmaps.ToArray(), BaseWidth, BaseHeight, BCnEncoder.Shared.CompressionFormat.Bc1WithAlpha);
-                            break;
-                        case DdtFileTypeFormat.Dxt3:
-                            image = await decoder.DecodeRawToImageRgba32Async(mipmaps.ToArray(), BaseWidth, BaseHeight, BCnEncoder.Shared.CompressionFormat.Bc2);
-                            break;
-                        case DdtFileTypeFormat.Dxt5:
-                            image = await decoder.DecodeRawToImageRgba32Async(mipmaps.ToArray(), BaseWidth, BaseHeight, BCnEncoder.Shared.CompressionFormat.Bc3);
-                            break;
-                        default:
-                            image = await decoder.DecodeRawToImageRgba32Async(mipmaps.ToArray(), BaseWidth, BaseHeight, BCnEncoder.Shared.CompressionFormat.Bgra);
-                            break;
-                        case DdtFileTypeFormat.Grey:
-                            image = await decoder.DecodeRawToImageRgba32Async(mipmaps.ToArray(), BaseWidth, BaseHeight, BCnEncoder.Shared.CompressionFormat.R);
-                            break;
-                    }
-
-
-                    if (Usage.HasFlag(DdtFileTypeUsage.Bump) && Format == DdtFileTypeFormat.Dxt5)
-                    {
-                        binaryReader.BaseStream.Position = 16;
-                        var offset = binaryReader.ReadInt32();
-                        var length = binaryReader.ReadInt32();
-                        binaryReader.BaseStream.Position = offset;
-                        byte[] data = DxtFileUtils.DecompressDxt5Bump(binaryReader.ReadBytes(length), BaseWidth, BaseHeight);
-                        image = Image.LoadPixelData<Bgra32>(data, BaseWidth, BaseHeight).CloneAs<Rgba32>();
-                    }
-                    mipmapMain = image;
                     using MemoryStream memory = new MemoryStream();
-                    await image.SaveAsBmpAsync(memory);
+                    await mipmapMain.SaveAsBmpAsync(memory);
                     Bitmap = new BitmapImage();
                     Bitmap.BeginInit();
                     Bitmap.StreamSource = memory;
@@ -140,7 +123,56 @@ namespace Resource_Manager.Classes.Ddt
                     Bitmap.EndInit();
                 }
             }
+        }
 
+
+        private void ReadTextureInfo(BinaryReader binaryReader)
+        {
+            Head = new string(binaryReader.ReadChars(4));
+            Usage = (DdtFileTypeUsage)binaryReader.ReadByte();
+            Alpha = (DdtFileTypeAlpha)binaryReader.ReadByte();
+            Format = (DdtFileTypeFormat)binaryReader.ReadByte();
+            MipmapLevels = binaryReader.ReadByte();
+            BaseWidth = (ushort)binaryReader.ReadInt32();
+            BaseHeight = (ushort)binaryReader.ReadInt32();
+
+            if (Head == DDTFileVersions.V4)
+            {
+                // This array impacts the color, but not yet sure how.
+                var colorTable_Size = binaryReader.ReadInt32();
+                ColorTable = binaryReader.ReadBytes(colorTable_Size);
+            }
+        }
+
+        private async Task<Image<Rgba32>> ReadPixels(BinaryReader binaryReader, bool decodeMipMaps, CancellationToken token)
+        {
+            // Read Mipmaps
+            List<Tuple<int, int>> offsets = new();
+            List<byte> mipmaps = new();
+            var numImagesPerLevel = Usage.HasFlag(DdtFileTypeUsage.Cube) ? 6 : 1;
+            for (var index = 0; index < MipmapLevels * numImagesPerLevel; index++)
+            {
+                var width = Math.Max(1, BaseWidth >> (index / numImagesPerLevel));
+                var height = Math.Max(1, BaseHeight >> (index / numImagesPerLevel));
+                var offset = binaryReader.ReadInt32();
+                var length = binaryReader.ReadInt32();
+                offsets.Add(new Tuple<int, int>(offset, length));
+                if (!decodeMipMaps) break;
+            }
+
+            foreach (var offset in offsets)
+            {
+                binaryReader.BaseStream.Position = offset.Item1;
+                mipmaps.AddRange(binaryReader.ReadBytes(offset.Item2));
+            }
+
+            // DDS decoder
+            BcDecoder decoder = new BcDecoder();
+            using (var dataStream = new MemoryStream(mipmaps.ToArray()))
+            {
+                var format = DDTFileHelper.GetCompressionFormat(Format);
+                return await decoder.DecodeRawToImageRgba32Async(dataStream, BaseWidth, BaseHeight, format, token: token);
+            }
         }
 
         public async Task Create(string source)
@@ -151,23 +183,25 @@ namespace Resource_Manager.Classes.Ddt
 
         public async Task FromPicture(string source)
         {
-            string file_name = Path.GetFileName(source);
-            var splitted_name = file_name.Split('.');
-            if (splitted_name.Length != 3)
+            if (!await LoadFromJson(source))
             {
-                throw new Exception("Missing DDT details in filename");
+                string file_name = Path.GetFileName(source);
+                var splitted_name = file_name.Split('.');
+                if (splitted_name.Length != 3)
+                {
+                    throw new Exception("Missing filename.info.json");
+                }
+                var splitted_params = splitted_name[1].Split(new char[] { ',', '(', ')' });
+                if (splitted_params.Length != 6)
+                {
+                    throw new Exception("Missing params in DDT details");
+                }
+                Head = DDTFileVersions.V3;
+                Usage = (DdtFileTypeUsage)Convert.ToByte(splitted_params[1]);
+                Alpha = (DdtFileTypeAlpha)Convert.ToByte(splitted_params[2]);
+                Format = (DdtFileTypeFormat)Convert.ToByte(splitted_params[3]);
+                MipmapLevels = Convert.ToByte(splitted_params[4]);
             }
-            var splitted_params = splitted_name[1].Split(new char[] { ',', '(', ')' });
-            if (splitted_params.Length != 6)
-            {
-                throw new Exception("Missing params in DDT details");
-            }
-            Head = 0x33535452;
-            Usage = (DdtFileTypeUsage)Convert.ToByte(splitted_params[1]);
-            Alpha = (DdtFileTypeAlpha)Convert.ToByte(splitted_params[2]);
-            Format = (DdtFileTypeFormat)Convert.ToByte(splitted_params[3]);
-            MipmapLevels = Convert.ToByte(splitted_params[4]);
-
 
             using Image<Rgba32> image = await Image.LoadAsync<Rgba32>(source);
 
@@ -183,32 +217,9 @@ namespace Resource_Manager.Classes.Ddt
 
             encoder.OutputOptions.GenerateMipMaps = true;
             encoder.OutputOptions.Quality = CompressionQuality.Balanced;
-            switch (Format)
-            {
-                case DdtFileTypeFormat.Dxt1:
-                    encoder.OutputOptions.Format = CompressionFormat.Bc1;
-                    break;
-                case DdtFileTypeFormat.Dxt1DE:
-                    encoder.OutputOptions.Format = CompressionFormat.Bc1WithAlpha;
-                    break;
-                case DdtFileTypeFormat.Dxt3:
-                    encoder.OutputOptions.Format = CompressionFormat.Bc2;
-                    break;
-                case DdtFileTypeFormat.Dxt5:
-                    encoder.OutputOptions.Format = CompressionFormat.Bc3;
-                    break;
-                case DdtFileTypeFormat.Grey:
-                case DdtFileTypeFormat.Bgra:
-                    encoder.OutputOptions.Format = CompressionFormat.Bgra;
-                    break;
-                default:
-                    {
-                        throw new Exception("Not valid DDT format.");
-                    }
-            }
-
-
+            encoder.OutputOptions.Format = DDTFileHelper.GetCompressionFormat(Format);
             encoder.OutputOptions.FileFormat = OutputFileFormat.Dds;
+            encoder.OutputOptions.MaxMipMapLevel = MipmapLevels;
 
             var mipmaps = await encoder.EncodeToRawBytesAsync(image);
 
@@ -216,23 +227,33 @@ namespace Resource_Manager.Classes.Ddt
             {
                 using (var bw = new BinaryWriter(ms))
                 {
-                    bw.Write(Head);
+                    var headChar = new char[] { Head[0], Head[1], Head[2], Head[3] };
+                    bw.Write(headChar);
                     bw.Write((byte)Usage);
                     bw.Write((byte)Alpha);
                     bw.Write((byte)Format);
                     bw.Write(MipmapLevels);
                     bw.Write((int)BaseWidth);
                     bw.Write((int)BaseHeight);
+
+                    if (Head == DDTFileVersions.V4)
+                    {
+                        bw.Write(ColorTable.Length);
+                        bw.Write(ColorTable);
+                    }
+
                     var numImagesPerLevel = Usage.HasFlag(DdtFileTypeUsage.Cube) ? 6 : 1;
+
+                    var fileInfoSize = (int)bw.BaseStream.Position;
+                    var mipmapInfoSize = 8 * MipmapLevels * numImagesPerLevel;
+                    var imageOffset = fileInfoSize + mipmapInfoSize;
+
                     for (var index = 0; index < MipmapLevels * numImagesPerLevel; ++index)
                     {
-                        if (index == 0)
-                            bw.Write(16 + 8 * MipmapLevels * numImagesPerLevel);
-                        else
-                        {
-                            bw.Write(16 + 8 * MipmapLevels * numImagesPerLevel + mipmaps.ToList().GetRange(0, index).Sum(x => x.Length));
-                        }
-                        bw.Write(mipmaps[index].Length);
+                        var arrayLength = mipmaps[index].GetLength(0);
+                        bw.Write(imageOffset);
+                        bw.Write(arrayLength);
+                        imageOffset += arrayLength;
 
                     }
                     for (var index = 0; index < MipmapLevels * numImagesPerLevel; ++index)
@@ -251,8 +272,10 @@ namespace Resource_Manager.Classes.Ddt
                 BitsPerPixel = TgaBitsPerPixel.Pixel32
             };
             var file_name = Path.GetFileNameWithoutExtension(dest);
-            file_name = file_name + ".(" + ((byte)Usage).ToString() + "," + ((byte)Alpha).ToString() + "," + ((byte)Format).ToString() + "," + ((byte)MipmapLevels).ToString() + ").tga";
-            await mipmapMain.SaveAsTgaAsync(Path.Combine(Path.GetDirectoryName(dest), file_name), tga);
+            file_name = $"{file_name}.tga";
+            var filePathFull = Path.Combine(Path.GetDirectoryName(dest), file_name);
+            await mipmapMain.SaveAsTgaAsync(filePathFull, tga);
+            await WriteFileNameData(filePathFull);
         }
 
         public async Task SaveAsPNG(string dest)
@@ -262,8 +285,72 @@ namespace Resource_Manager.Classes.Ddt
                 ColorType = PngColorType.RgbWithAlpha
             };
             var file_name = Path.GetFileNameWithoutExtension(dest);
-            file_name = file_name + ".(" + ((byte)Usage).ToString() + "," + ((byte)Alpha).ToString() + "," + ((byte)Format).ToString() + "," + ((byte)MipmapLevels).ToString() + ").png";
-            await mipmapMain.SaveAsPngAsync(Path.Combine(Path.GetDirectoryName(dest), file_name), png);
+            file_name = $"{file_name}.png";
+            var filePathFull = Path.Combine(Path.GetDirectoryName(dest), file_name);
+            await mipmapMain.SaveAsPngAsync(filePathFull, png);
+            await WriteFileNameData(filePathFull);
+        }
+
+        /*
+         Below stores ddt header info for easy conversion
+         */
+
+        private class DDTFileInfo
+        {
+            public string Head { get; set; }
+            public DdtFileTypeUsage Usage { get; set; }
+            public DdtFileTypeAlpha Alpha { get; set; }
+            public DdtFileTypeFormat Format { get; set; }
+            public byte MipmapLevels { get; set; }
+            public ushort BaseWidth { get; set; }
+            public ushort BaseHeight { get; set; }
+            public string? colorTable { get; set; }
+        }
+
+        private async Task WriteFileNameData(string file_name)
+        {
+            var info = new DDTFileInfo()
+            {
+                Head = Head,
+                Usage = Usage,
+                Alpha = Alpha,
+                Format = Format,
+                MipmapLevels = MipmapLevels,
+                BaseWidth = BaseWidth,
+                BaseHeight = BaseHeight,
+                colorTable = ColorTable != null? string.Join(' ', ColorTable) : string.Empty
+            };
+
+            var data = System.Text.Json.JsonSerializer.Serialize(info);
+            await File.WriteAllTextAsync($"{file_name}.info.json", data);
+        }
+
+        public async Task<bool> LoadFromJson(string file_name)
+        {
+            var jsonFilepath = $"{file_name}.info.json";
+            if (!File.Exists(jsonFilepath))
+                return false;
+
+            var data = await File.ReadAllTextAsync(jsonFilepath);
+            var info = System.Text.Json.JsonSerializer.Deserialize<DDTFileInfo>(data);
+            Head = info.Head;
+            Usage = info.Usage;
+            Alpha = info.Alpha;
+            Format = info.Format;
+            MipmapLevels = info.MipmapLevels;
+            BaseWidth = info.BaseWidth;
+            BaseHeight = info.BaseHeight;
+
+            if (Head == DDTFileVersions.V4)
+            {
+                var split = info.colorTable.Split(' ');
+                ColorTable = new byte[split.Length];
+                for (int i = 0; i < ColorTable.Length; ++i)
+                {
+                    ColorTable[i] = byte.Parse(split[i]);
+                }
+            }
+            return true;
         }
     }
 }

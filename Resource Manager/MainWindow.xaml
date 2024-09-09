@@ -6,7 +6,7 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:local="clr-namespace:Resource_Manager"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-    Title="{Binding file.barFileName, StringFormat='{}Resource Manager v0.6.0 - {0}', FallbackValue='Resource Manager v0.6.0'}"
+    Title="{Binding file.barFileName, StringFormat='{}Resource Manager v0.7.0 - {0}', FallbackValue='Resource Manager v0.7.0'}"
     Width="1177"
     Height="700"
     FontFamily="{StaticResource Trajan Pro}"

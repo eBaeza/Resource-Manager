@@ -50,7 +50,7 @@
                 <Run FontSize="14" Text="Copyright (c) 2020-2022 VladTheJunior" />
 
                 <LineBreak />
-                <Run FontSize="14" Text="version: 0.6.0" />
+                <Run FontSize="14" Text="version: 0.7.0" />
             </TextBlock>
             <TextBlock
                 Grid.Row="1"

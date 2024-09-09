@@ -109,7 +109,7 @@ namespace ResourceManagerUpdater
         {
             get
             {
-                return "0.6.0";
+                return "0.7.0";
             }
         } 
         public string AvailableVersionUrl
